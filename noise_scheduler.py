@@ -12,6 +12,14 @@ class LinearNoiseScheduler:
         self.alphas_cum_prod_sqrt = torch.sqrt(self.alphas_cum_prod)
         self.sqrt_one_minus_alphas_cum_prod = torch.sqrt(1.0 - self.alphas_cum_prod)
 
+    def to(self, device):
+        self.betas = self.betas.to(device)
+        self.alphas = self.alphas.to(device)
+        self.alphas_cum_prod = self.alphas_cum_prod.to(device)
+        self.alphas_cum_prod_sqrt = self.alphas_cum_prod_sqrt.to(device)
+        self.sqrt_one_minus_alphas_cum_prod = self.sqrt_one_minus_alphas_cum_prod.to(device)
+        return self
+
     def add_noise(self, original, noise, t):
         original_shape = original.shape
         batch_size = original_shape[0]
