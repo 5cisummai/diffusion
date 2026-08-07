@@ -1,5 +1,6 @@
 import torch
 
+
 class LinearNoiseScheduler:
     def __init__(self, num_timesteps: int, beta_start, beta_end):
         self.num_timesteps = num_timesteps
@@ -20,6 +21,12 @@ class LinearNoiseScheduler:
         self.sqrt_one_minus_alphas_cum_prod = self.sqrt_one_minus_alphas_cum_prod.to(device)
         return self
 
+    def _gather(self, values, t, x_shape):
+        out = values[t]
+        for _ in range(len(x_shape) - 1):
+            out = out.unsqueeze(-1)
+        return out
+
     def add_noise(self, original, noise, t):
         original_shape = original.shape
         batch_size = original_shape[0]
@@ -32,6 +39,49 @@ class LinearNoiseScheduler:
             sqrt_one_minus_alphas_cum_prod = sqrt_one_minus_alphas_cum_prod.unsqueeze(-1)
 
         return sqrt_alphas_cum_prod * original + sqrt_one_minus_alphas_cum_prod * noise
+
+    def get_ddim_timesteps(self, num_inference_steps: int, device=None):
+        if num_inference_steps >= self.num_timesteps:
+            return torch.arange(
+                self.num_timesteps - 1,
+                -1,
+                -1,
+                device=device,
+                dtype=torch.long,
+            )
+
+        return torch.linspace(
+            self.num_timesteps - 1,
+            0,
+            num_inference_steps,
+            device=device,
+        ).long()
+
+    def ddim_step(self, xt, noise_pred, t: int, t_prev: int, eta: float = 0.0):
+        alpha_prod_t = self._gather(self.alphas_cum_prod, t, xt.shape)
+        alpha_prod_t_prev = (
+            self._gather(self.alphas_cum_prod, t_prev, xt.shape)
+            if t_prev >= 0
+            else torch.ones_like(alpha_prod_t)
+        )
+
+        pred_x0 = (
+            xt - self._gather(self.sqrt_one_minus_alphas_cum_prod, t, xt.shape) * noise_pred
+        ) / self._gather(self.alphas_cum_prod_sqrt, t, xt.shape)
+        pred_x0 = pred_x0.clamp(-1, 1)
+
+        variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t)
+        variance = variance * (1 - alpha_prod_t / alpha_prod_t_prev)
+        std_dev_t = eta * variance.clamp(min=0).sqrt()
+
+        pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t ** 2).clamp(min=0).sqrt() * noise_pred
+        prev_sample = alpha_prod_t_prev.sqrt() * pred_x0 + pred_sample_direction
+
+        if eta > 0:
+            noise = torch.randn_like(xt)
+            prev_sample = prev_sample + std_dev_t * noise
+
+        return prev_sample, pred_x0
 
     def sample_prev_timestep(self, xt, noise_pred, t):
         x0 = (xt - (self.sqrt_one_minus_alphas_cum_prod[t] * noise_pred)) / torch.sqrt(self.alphas_cum_prod[t])

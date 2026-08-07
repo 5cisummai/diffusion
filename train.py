@@ -89,21 +89,19 @@ def evaluate(model, test_loader, scheduler, device, epoch, total_epochs):
 
 
 @torch.no_grad()
-def sample_images(model, scheduler, device, num_images: int, output_path: Path):
+def sample_images(model, scheduler, device, num_images: int, output_path: Path, sample_steps: int):
     model.eval()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     images = torch.randn(num_images, IN_CHANNELS, IMAGE_SIZE, IMAGE_SIZE, device=device)
+    ddim_timesteps = scheduler.get_ddim_timesteps(sample_steps, device=device)
 
-    for t in tqdm(
-        reversed(range(scheduler.num_timesteps)),
-        desc="Sampling",
-        leave=False,
-        total=scheduler.num_timesteps,
-    ):
+    for i in tqdm(range(len(ddim_timesteps) - 1), desc="DDIM sampling", leave=False):
+        t = ddim_timesteps[i].item()
+        t_prev = ddim_timesteps[i + 1].item()
         timesteps = torch.full((num_images,), t, device=device, dtype=torch.long)
         noise_pred = model(images, timesteps)
-        images, _ = scheduler.sample_prev_timestep(images, noise_pred, t)
+        images, _ = scheduler.ddim_step(images, noise_pred, t, t_prev, eta=0.0)
 
     images = (images.clamp(-1, 1) + 1) / 2
     save_image(images, output_path, nrow=int(num_images ** 0.5))
@@ -137,6 +135,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--num-samples", type=int, default=16)
+    parser.add_argument("--sample-steps", type=int, default=50, help="DDIM denoising steps")
     parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--sample-only", action="store_true", help="Only generate samples from a checkpoint")
     return parser.parse_args()
@@ -163,6 +162,7 @@ def main():
             device,
             args.num_samples,
             output_dir / "samples.png",
+            args.sample_steps,
         )
         print(f"Saved samples to {output_dir / 'samples.png'}")
         return
@@ -192,6 +192,7 @@ def main():
             device,
             args.num_samples,
             output_dir / f"samples_epoch_{epoch + 1}.png",
+            args.sample_steps,
         )
 
     print(f"Training complete. Checkpoints and samples saved to {output_dir}")
