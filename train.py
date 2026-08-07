@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
+from tqdm import tqdm
 
 from model import Unet
 from noise_scheduler import LinearNoiseScheduler
@@ -39,11 +40,12 @@ def get_mnist_dataloaders(data_dir: str, batch_size: int):
     return train_loader, test_loader
 
 
-def train_epoch(model, train_loader, scheduler, optimizer, device):
+def train_epoch(model, train_loader, scheduler, optimizer, device, epoch, total_epochs):
     model.train()
     total_loss = 0.0
 
-    for images, _ in train_loader:
+    progress = tqdm(train_loader, desc=f"Train {epoch}/{total_epochs}", leave=False)
+    for images, _ in progress:
         images = images.to(device)
         batch_size = images.shape[0]
 
@@ -59,16 +61,18 @@ def train_epoch(model, train_loader, scheduler, optimizer, device):
         optimizer.step()
 
         total_loss += loss.item()
+        progress.set_postfix(loss=f"{loss.item():.4f}")
 
     return total_loss / len(train_loader)
 
 
 @torch.no_grad()
-def evaluate(model, test_loader, scheduler, device):
+def evaluate(model, test_loader, scheduler, device, epoch, total_epochs):
     model.eval()
     total_loss = 0.0
 
-    for images, _ in test_loader:
+    progress = tqdm(test_loader, desc=f"Eval {epoch}/{total_epochs}", leave=False)
+    for images, _ in progress:
         images = images.to(device)
         batch_size = images.shape[0]
 
@@ -79,6 +83,7 @@ def evaluate(model, test_loader, scheduler, device):
         noise_pred = model(noisy_images, timesteps)
         loss = F.mse_loss(noise_pred, noise)
         total_loss += loss.item()
+        progress.set_postfix(loss=f"{loss.item():.4f}")
 
     return total_loss / len(test_loader)
 
@@ -90,7 +95,12 @@ def sample_images(model, scheduler, device, num_images: int, output_path: Path):
 
     images = torch.randn(num_images, IN_CHANNELS, IMAGE_SIZE, IMAGE_SIZE, device=device)
 
-    for t in reversed(range(scheduler.num_timesteps)):
+    for t in tqdm(
+        reversed(range(scheduler.num_timesteps)),
+        desc="Sampling",
+        leave=False,
+        total=scheduler.num_timesteps,
+    ):
         timesteps = torch.full((num_images,), t, device=device, dtype=torch.long)
         noise_pred = model(images, timesteps)
         images, _ = scheduler.sample_prev_timestep(images, noise_pred, t)
@@ -157,14 +167,21 @@ def main():
         print(f"Saved samples to {output_dir / 'samples.png'}")
         return
 
+    print(f"Using device: {device}")
     train_loader, test_loader = get_mnist_dataloaders(args.data_dir, args.batch_size)
+    print(f"Loaded MNIST: {len(train_loader.dataset)} train, {len(test_loader.dataset)} test images")
 
     for epoch in range(start_epoch, args.epochs):
-        train_loss = train_epoch(model, train_loader, scheduler, optimizer, device)
-        test_loss = evaluate(model, test_loader, scheduler, device)
+        epoch_num = epoch + 1
+        train_loss = train_epoch(
+            model, train_loader, scheduler, optimizer, device, epoch_num, args.epochs
+        )
+        test_loss = evaluate(
+            model, test_loader, scheduler, device, epoch_num, args.epochs
+        )
 
-        print(
-            f"Epoch {epoch + 1}/{args.epochs} | "
+        tqdm.write(
+            f"Epoch {epoch_num}/{args.epochs} | "
             f"train loss: {train_loss:.4f} | test loss: {test_loss:.4f}"
         )
 
