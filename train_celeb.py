@@ -1,10 +1,12 @@
 import argparse
+import csv
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
 
@@ -30,7 +32,104 @@ def use_bf16(device: torch.device) -> bool:
     return device.type == "cuda" and torch.cuda.is_bf16_supported()
 
 
+MIN_CELEBA_IMAGES = 200_000
+
+
+def count_celeba_images(celeba_dir: Path) -> int:
+    image_dir = celeba_dir / "img_align_celeba"
+    if not image_dir.is_dir():
+        return 0
+    return sum(1 for _ in image_dir.glob("*.jpg"))
+
+
+def normalize_filename(name: str) -> str:
+    name = name.strip()
+    if name.endswith(".jpg"):
+        return name
+    if name.isdigit():
+        return f"{int(name):06d}.jpg"
+    return name
+
+
+def partition_file_exists(celeba_dir: Path) -> bool:
+    return (celeba_dir / "list_eval_partition.txt").exists() or (
+        celeba_dir / "list_eval_partition.csv"
+    ).exists()
+
+
+def celeba_is_ready(data_dir: str) -> bool:
+    celeba_dir = Path(data_dir) / "celeba"
+    if not (celeba_dir / "img_align_celeba").is_dir():
+        return False
+    if not partition_file_exists(celeba_dir):
+        return False
+    return count_celeba_images(celeba_dir) >= MIN_CELEBA_IMAGES
+
+
+def load_partition(celeba_dir: Path) -> dict[str, int]:
+    txt_path = celeba_dir / "list_eval_partition.txt"
+    csv_path = celeba_dir / "list_eval_partition.csv"
+    partition: dict[str, int] = {}
+
+    if txt_path.exists():
+        with txt_path.open(encoding="utf-8") as handle:
+            handle.readline()
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                filename, split_value = line.rsplit(" ", 1)
+                partition[normalize_filename(filename)] = int(split_value)
+    elif csv_path.exists():
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            next(reader)
+            for row in reader:
+                if row:
+                    partition[normalize_filename(row[0])] = int(row[1])
+    else:
+        raise FileNotFoundError(f"Missing partition file in {celeba_dir}")
+
+    return partition
+
+
+class CelebAImageDataset(Dataset):
+    def __init__(self, data_dir: str, split: str, transform=None):
+        celeba_dir = Path(data_dir) / "celeba"
+        self.image_dir = celeba_dir / "img_align_celeba"
+        self.transform = transform
+        split_ids = {"train": 0, "valid": 1, "test": 2}
+        if split not in split_ids:
+            raise ValueError(f"Unknown split: {split}")
+
+        partition = load_partition(celeba_dir)
+        target_split = split_ids[split]
+        self.filenames = sorted(
+            path.name
+            for path in self.image_dir.glob("*.jpg")
+            if partition.get(path.name) == target_split
+        )
+        if not self.filenames:
+            raise RuntimeError(f"No CelebA images found for split={split} under {self.image_dir}")
+
+    def __len__(self) -> int:
+        return len(self.filenames)
+
+    def __getitem__(self, index: int):
+        image_path = self.image_dir / self.filenames[index]
+        image = Image.open(image_path).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, 0
+
+
 def get_celeba_dataloaders(data_dir: str, batch_size: int, num_workers: int):
+    if not celeba_is_ready(data_dir):
+        raise RuntimeError(
+            f"CelebA not found under {Path(data_dir) / 'celeba'}. "
+            "Extract the dataset first (see train_celeb_colab.ipynb section 4)."
+        )
+
     transform = transforms.Compose([
         transforms.Resize(IMAGE_SIZE),
         transforms.CenterCrop(IMAGE_SIZE),
@@ -45,20 +144,8 @@ def get_celeba_dataloaders(data_dir: str, batch_size: int, num_workers: int):
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
 
-    train_dataset = datasets.CelebA(
-        root=data_dir,
-        split="train",
-        target_type="attr",
-        download=True,
-        transform=transform,
-    )
-    test_dataset = datasets.CelebA(
-        root=data_dir,
-        split="valid",
-        target_type="attr",
-        download=True,
-        transform=eval_transform,
-    )
+    train_dataset = CelebAImageDataset(data_dir, split="train", transform=transform)
+    test_dataset = CelebAImageDataset(data_dir, split="valid", transform=eval_transform)
 
     loader_kwargs = {
         "batch_size": batch_size,
